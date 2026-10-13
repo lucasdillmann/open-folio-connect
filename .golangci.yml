@@ -1,0 +1,159 @@
+version: "2"
+run:
+  build-tags:
+    - integration
+  modules-download-mode: readonly
+  tests: true
+linters:
+  enable:
+    - dupl
+    - goconst
+    - gocritic
+    - gocyclo
+    - gosec
+    - misspell
+    - nakedret
+    - prealloc
+    - predeclared
+    - revive
+    - unconvert
+    - unparam
+    - govet
+    - forbidigo
+  settings:
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^NewMocked.*$
+          msg: "Do not use shared mocks in production code"
+        - pattern: ^RunWithMocked.*$
+          msg: "Do not use shared mocks in production code"
+    govet:
+      enable-all: true
+    dupl:
+      threshold: 100
+    errcheck:
+      check-type-assertions: false
+      check-blank: false
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+      ignore-map-keys: true
+    gocyclo:
+      min-complexity: 20
+    gosec:
+      excludes:
+        - G204
+        - G117
+      config:
+        G306: "0644"
+    misspell:
+      locale: US
+    nakedret:
+      max-func-lines: 30
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+    revive:
+      max-open-files: 2048
+      confidence: 0.8
+      severity: warning
+      enable-all-rules: true
+      rules:
+        - name: line-length-limit
+          disabled: true
+        - name: multiline-if-init
+          disabled: true
+        - name: cognitive-complexity
+          disabled: true
+        - name: add-constant
+          disabled: true
+        - name: unused-receiver
+          disabled: true
+        - name: flag-parameter
+          disabled: true
+        - name: unsecure-url-scheme
+          disabled: true
+        - name: unchecked-type-assertion
+          disabled: true
+        - name: cyclomatic
+          disabled: true
+        - name: function-length
+          disabled: true
+        - name: function-result-limit
+          disabled: true
+        - name: max-public-structs
+          disabled: true
+        - name: use-slices-sort
+          disabled: true
+        - name: epoch-naming
+          disabled: true
+        - name: package-naming
+          disabled: true
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+            - sayRepetitiveInsteadOfStutters
+    unparam:
+      check-exported: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - errcheck
+          - goconst
+          - gocyclo
+          - gosec
+          - forbidigo
+        path: _test\.go
+      - linters:
+          - govet
+        path: "pqsql"
+      - linters:
+          - revive
+        text: "avoid package names that conflict with Go standard library package names"
+    paths:
+      - vendor
+      - testdata
+      - examples
+      - third_party$
+      - builtin$
+      - examples$
+      - ^internal/i18n/
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - text: "avoid package names that conflict with Go standard library package names"
+      linters:
+        - revive
+formatters:
+  enable:
+    - goimports
+    - gofumpt
+    - golines
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/lucasdillmann/open-folio-connect
+    gofumpt:
+      module-path: github.com/lucasdillmann/open-folio-connect
+      extra:
+        group-params: true
+  exclusions:
+    generated: lax
+    paths:
+      - vendor
+      - testdata
+      - examples
+      - third_party$
+      - builtin$
+      - examples$
+      - ^internal/i18n/

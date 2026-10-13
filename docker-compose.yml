@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${OFC_DB_NAME:?set OFC_DB_NAME in .env}
+      POSTGRES_USER: ${OFC_DB_USER:?set OFC_DB_USER in .env}
+      POSTGRES_PASSWORD: ${OFC_DB_PASSWORD:?set OFC_DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OFC_DB_NAME} -d ${OFC_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ofc:
+    image: ${OFC_IMAGE:-dillmann/open-folio-connect:latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${OFC_BIND}:${OFC_PORT}:8080"
+    env_file:
+      - .env
+    environment:
+      OFC_DATABASE_URL: postgres://${OFC_DB_USER}:${OFC_DB_PASSWORD}@db:5432/${OFC_DB_NAME}?sslmode=disable
+      OFC_DATA_DIR: /data
+      OFC_ADDR: ":8080"
+    volumes:
+      - ofc-data:/data
+
+volumes:
+  postgres-data:
+  ofc-data:

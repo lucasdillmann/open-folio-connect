@@ -1,0 +1,34 @@
+package config
+
+import "time"
+
+type Config struct {
+	Addr             string
+	DatabaseURL      string
+	LogLevel         string
+	AnonKey          string
+	DataDir          string
+	BaseURL          string
+	AdminPassword    string
+	AdminEmail       string
+	JWTSecret        []byte
+	AllowedOrigins   AllowedOrigins
+	PairingTTL       time.Duration
+	ChallengeTTL     time.Duration
+	MaxSnapshotBytes int64
+	PushBatchMax     int
+	AuthCodeTTL      time.Duration
+	OTPCodeTTL       time.Duration
+	RefreshTokenTTL  time.Duration
+	AccessTokenTTL   time.Duration
+	DevOTP           bool
+}
+
+type AllowedOrigins struct {
+	Origins []string
+	All     bool
+}
+
+func (a AllowedOrigins) Enabled() bool {
+	return a.All || len(a.Origins) > 0
+}

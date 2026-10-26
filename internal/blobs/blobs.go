@@ -31,6 +31,10 @@ func (s *Store) Root() string {
 }
 
 func (s *Store) relPath(id string) string {
+	return SnapshotRelPath(id)
+}
+
+func SnapshotRelPath(id string) string {
 	return filepath.Join("snapshots", id+".blob")
 }
 

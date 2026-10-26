@@ -84,16 +84,14 @@ free_port() {
   python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()"
 }
 
-snapshot_upload_reject() {
+snapshot_prepare_reject() {
   local name="$1"
   shift
-  status "$name" 400 -X POST "$BASE/api/v1/sync/snapshots/upload" \
+  status "$name" 400 -X POST "$BASE/api/v1/sync/snapshots/prepare-upload" \
     "${AUTH[@]}" \
     -H "x-wf-device-id: $DEVICE_A" \
-    -H "x-snapshot-schema-version: 4" \
-    -H "x-snapshot-covers-tables: accounts" \
-    -H "x-snapshot-payload-key-version: $KV" \
-    "$@" --data-binary @/tmp/ofc-bad.bin
+    -H 'Content-Type: application/json' \
+    "$@"
 }
 
 if [ -z "$BASE" ]; then
@@ -359,50 +357,74 @@ section "6. snapshots"
 printf 'snapshot-%s\000\001\002binary' "$RUN" > /tmp/ofc-snap.bin
 SUM=$(shasum -a 256 /tmp/ofc-snap.bin | cut -d' ' -f1)
 SIZE=$(wc -c < /tmp/ofc-snap.bin | tr -d ' ')
-SNAP_EVENT=$(uuid)
+CHECKSUM="sha256:$SUM"
 
-UP=$(curl -sf -X POST "$BASE/api/v1/sync/snapshots/upload" "${AUTH[@]}" \
-  -H "x-wf-device-id: $DEVICE_A" \
-  -H "x-snapshot-event-id: $SNAP_EVENT" \
-  -H "x-snapshot-schema-version: 4" \
-  -H "x-snapshot-covers-tables: accounts,assets" \
-  -H "x-snapshot-size-bytes: $SIZE" \
-  -H "x-snapshot-checksum: sha256:$SUM" \
-  -H "x-snapshot-metadata-payload: bWV0YQ==" \
-  -H "x-snapshot-payload-key-version: $KV" \
-  -H "x-snapshot-base-seq: $CURSOR" \
-  --data-binary @/tmp/ofc-snap.bin)
+PREP=$(curl -sf -X POST "$BASE/api/v1/sync/snapshots/prepare-upload" "${AUTH[@]}" \
+  -H "x-wf-device-id: $DEVICE_A" -H 'Content-Type: application/json' \
+  -d "{\"event_id\":\"$(uuid)\",\"snapshot_seq\":$CURSOR,\"schema_version\":4,\"size_bytes\":$SIZE,\"checksum\":\"$CHECKSUM\",\"metadata_payload\":\"bWV0YQ==\",\"payload_key_version\":$KV}")
+TICKET=$(j "$PREP" "['ticket']")
+TRANSFER_URL=$(j "$PREP" "['transfer']['url']")
+TRANSFER_METHOD=$(j "$PREP" "['transfer']['method']")
+TRANSFER_SUM=$(j "$PREP" "['transfer']['headers']['x-amz-checksum-sha256']")
+check "prepare-upload returns a ticket" "$PREP" '"ticket"'
+equal "prepare-upload returns a PUT transfer" "$TRANSFER_METHOD" "PUT"
+check "prepare-upload scopes the transfer to the snapshot" "$TRANSFER_URL" '/api/v1/sync/transfers/'
+
+status "the transfer PUT accepts the ciphertext" 204 -X PUT "$TRANSFER_URL" \
+  -H "content-length: $SIZE" -H "x-amz-checksum-sha256: $TRANSFER_SUM" \
+  --data-binary @/tmp/ofc-snap.bin
+
+UP=$(curl -sf -X POST "$BASE/api/v1/sync/snapshots/complete-upload" "${AUTH[@]}" \
+  -H "x-wf-device-id: $DEVICE_A" -H 'Content-Type: application/json' \
+  -d "{\"ticket\":\"$TICKET\"}")
 SNAP_ID=$(j "$UP" "['snapshotId']")
-check "upload returns a snapshotId" "$UP" '"snapshotId"'
-equal "upload records the client base seq" "$(j "$UP" "['oplogSeq']")" "$CURSOR"
+check "complete-upload returns a snapshotId" "$UP" '"snapshotId"'
+equal "complete-upload records the client base seq" "$(j "$UP" "['oplogSeq']")" "$CURSOR"
 
 LATEST=$(curl -sf "${AUTH[@]}" -H "x-wf-device-id: $DEVICE_A" "$BASE/api/v1/sync/snapshots/latest")
 equal "latest reports the uploaded id" "$(j "$LATEST" "['snapshotId']")" "$SNAP_ID"
-check "latest reports covered tables" "$LATEST" '"coversTables":["accounts","assets"]'
 equal "latest reports the byte size" "$(j "$LATEST" "['sizeBytes']")" "$SIZE"
 check "latest checksum uses the sha256 prefix" "$LATEST" '"checksum":"sha256:'
 
-curl -sf -D /tmp/ofc-dl.headers "${AUTH[@]}" -H "x-wf-device-id: $DEVICE_A" \
-  "$BASE/api/v1/sync/snapshots/$SNAP_ID" -o /tmp/ofc-dl.bin
+DL=$(curl -sf -X POST "$BASE/api/v1/sync/snapshots/$SNAP_ID/download-url" "${AUTH[@]}" \
+  -H "x-wf-device-id: $DEVICE_A" -H 'Content-Type: application/json' -d '{}')
+equal "download-url returns a GET transfer" "$(j "$DL" "['transfer']['method']")" "GET"
+equal "download-url echoes the snapshot id" "$(j "$DL" "['snapshot']['snapshotId']")" "$SNAP_ID"
+DL_URL=$(j "$DL" "['transfer']['url']")
+curl -sf "$DL_URL" -o /tmp/ofc-dl.bin
 check "download returns byte-identical content" \
   "$(cmp -s /tmp/ofc-snap.bin /tmp/ofc-dl.bin && echo same || echo differ)" 'same'
-check "download sends the schema version header" \
-  "$(grep -ic 'x-snapshot-schema-version: 4' /tmp/ofc-dl.headers)" '1'
-check "download sends the covered tables header" \
-  "$(grep -ic 'x-snapshot-covers-tables: accounts,assets' /tmp/ofc-dl.headers)" '1'
-check "download checksum matches the transferred bytes" \
-  "$(grep -i 'x-snapshot-checksum:' /tmp/ofc-dl.headers | tr -d '\r' | grep -qi "sha256:$SUM" && echo match || echo mismatch)" 'match'
 
-printf 'tampered' > /tmp/ofc-bad.bin
-BADSUM=$(shasum -a 256 /tmp/ofc-bad.bin | cut -d' ' -f1)
-snapshot_upload_reject "checksum mismatch is refused" \
-  -H "x-snapshot-event-id: $(uuid)" -H "x-snapshot-size-bytes: 8" -H "x-snapshot-checksum: sha256:$SUM"
-snapshot_upload_reject "size mismatch is refused" \
-  -H "x-snapshot-event-id: $(uuid)" -H "x-snapshot-size-bytes: 999999" -H "x-snapshot-checksum: sha256:$BADSUM"
-snapshot_upload_reject "non-uuid event id is refused" \
-  -H "x-snapshot-event-id: not-a-uuid" -H "x-snapshot-size-bytes: 8" -H "x-snapshot-checksum: sha256:$BADSUM"
-snapshot_upload_reject "malformed checksum is refused" \
-  -H "x-snapshot-event-id: $(uuid)" -H "x-snapshot-size-bytes: 8" -H "x-snapshot-checksum: nope"
+snapshot_prepare_reject "non-uuid event id is refused" \
+  -d "{\"event_id\":\"not-a-uuid\",\"snapshot_seq\":$CURSOR,\"schema_version\":4,\"size_bytes\":$SIZE,\"checksum\":\"$CHECKSUM\",\"payload_key_version\":$KV}"
+snapshot_prepare_reject "malformed checksum is refused" \
+  -d "{\"event_id\":\"$(uuid)\",\"snapshot_seq\":$CURSOR,\"schema_version\":4,\"size_bytes\":$SIZE,\"checksum\":\"nope\",\"payload_key_version\":$KV}"
+snapshot_prepare_reject "zero size is refused" \
+  -d "{\"event_id\":\"$(uuid)\",\"snapshot_seq\":$CURSOR,\"schema_version\":4,\"size_bytes\":0,\"checksum\":\"$CHECKSUM\",\"payload_key_version\":$KV}"
+snapshot_prepare_reject "negative snapshot seq is refused" \
+  -d "{\"event_id\":\"$(uuid)\",\"snapshot_seq\":-1,\"schema_version\":4,\"size_bytes\":$SIZE,\"checksum\":\"$CHECKSUM\",\"payload_key_version\":$KV}"
+
+status "an unsigned transfer link is refused" 403 -X PUT "$BASE/api/v1/sync/transfers/not-a-token" \
+  --data-binary @/tmp/ofc-snap.bin
+
+cp /tmp/ofc-snap.bin /tmp/ofc-tampered.bin
+printf 'X' | dd of=/tmp/ofc-tampered.bin bs=1 seek=0 conv=notrunc count=1 2>/dev/null
+PREP_T=$(curl -sf -X POST "$BASE/api/v1/sync/snapshots/prepare-upload" "${AUTH[@]}" \
+  -H "x-wf-device-id: $DEVICE_A" -H 'Content-Type: application/json' \
+  -d "{\"event_id\":\"$(uuid)\",\"snapshot_seq\":$CURSOR,\"schema_version\":4,\"size_bytes\":$SIZE,\"checksum\":\"$CHECKSUM\",\"payload_key_version\":$KV}")
+T_URL=$(j "$PREP_T" "['transfer']['url']")
+T_SUM=$(j "$PREP_T" "['transfer']['headers']['x-amz-checksum-sha256']")
+status "tampered transfer bytes are refused" 409 -X PUT "$T_URL" \
+  -H "content-length: $SIZE" -H "x-amz-checksum-sha256: $T_SUM" \
+  --data-binary @/tmp/ofc-tampered.bin
+
+PREP_M=$(curl -sf -X POST "$BASE/api/v1/sync/snapshots/prepare-upload" "${AUTH[@]}" \
+  -H "x-wf-device-id: $DEVICE_A" -H 'Content-Type: application/json' \
+  -d "{\"event_id\":\"$(uuid)\",\"snapshot_seq\":$CURSOR,\"schema_version\":4,\"size_bytes\":$SIZE,\"checksum\":\"$CHECKSUM\",\"payload_key_version\":$KV}")
+status "complete-upload before the bytes is refused" 409 \
+  -X POST "$BASE/api/v1/sync/snapshots/complete-upload" "${AUTH[@]}" \
+  -H "x-wf-device-id: $DEVICE_A" -H 'Content-Type: application/json' \
+  -d "{\"ticket\":\"$(j "$PREP_M" "['ticket']")\"}"
 
 section "7. device B: enroll, pair, confirm"
 NONCE_B=$(uuid)
@@ -495,8 +517,8 @@ status "an unknown device is 404" 404 "${AUTH[@]}" \
   -H "x-wf-device-id: $(uuid)" "$BASE/api/v1/sync/events/cursor"
 status "push without a device header is rejected" 401 -X POST "$BASE/api/v1/sync/events/push" \
   "${AUTH[@]}" -H 'Content-Type: application/json' -d '{"events":[]}'
-status "an unknown snapshot is 404" 404 "${AUTH[@]}" -H "x-wf-device-id: $DEVICE_A" \
-  "$BASE/api/v1/sync/snapshots/$(uuid)"
+status "an unknown snapshot is 404" 404 -X POST "${AUTH[@]}" -H "x-wf-device-id: $DEVICE_A" \
+  -H 'Content-Type: application/json' -d '{}' "$BASE/api/v1/sync/snapshots/$(uuid)/download-url"
 
 ENROLL_C=$(curl -sf -X POST "$BASE/api/v1/sync/team/devices" "${AUTH[@]}" \
   -H 'Content-Type: application/json' \

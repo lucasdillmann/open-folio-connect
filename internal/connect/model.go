@@ -151,6 +151,37 @@ type snapshotLatestResponse struct {
 	SizeBytes     int64    `json:"sizeBytes"`
 }
 
+type prepareUploadRequest struct {
+	EventID           string `json:"event_id"`
+	Checksum          string `json:"checksum"`
+	MetadataPayload   string `json:"metadata_payload"`
+	SizeBytes         int64  `json:"size_bytes"`
+	SnapshotSeq       int64  `json:"snapshot_seq"`
+	SchemaVersion     int    `json:"schema_version"`
+	PayloadKeyVersion int    `json:"payload_key_version"`
+}
+
+type completeUploadRequest struct {
+	Ticket string `json:"ticket"`
+}
+
+type prepareUploadResponse struct {
+	Transfer *transferDescriptor `json:"transfer"`
+	Ticket   string              `json:"ticket"`
+}
+
+type snapshotUploadResponse struct {
+	SnapshotID string `json:"snapshotId"`
+	R2Key      string `json:"r2Key"`
+	CreatedAt  string `json:"createdAt"`
+	OplogSeq   int64  `json:"oplogSeq"`
+}
+
+type snapshotDownloadResponse struct {
+	Transfer *transferDescriptor    `json:"transfer"`
+	Snapshot snapshotLatestResponse `json:"snapshot"`
+}
+
 type apiUser struct {
 	Timezone           *string  `json:"timezone"`
 	Email              *string  `json:"email"`

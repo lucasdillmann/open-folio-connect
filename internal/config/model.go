@@ -15,6 +15,7 @@ type Config struct {
 	AllowedOrigins   AllowedOrigins
 	PairingTTL       time.Duration
 	ChallengeTTL     time.Duration
+	TransferTTL      time.Duration
 	MaxSnapshotBytes int64
 	PushBatchMax     int
 	AuthCodeTTL      time.Duration

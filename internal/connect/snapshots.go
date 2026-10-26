@@ -3,12 +3,11 @@ package connect
 import (
 	"crypto/sha256"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,7 +16,96 @@ import (
 	"github.com/lucasdillmann/open-folio-connect/internal/store"
 )
 
-func (h *Handler) uploadSnapshot(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) prepareSnapshotUpload(w http.ResponseWriter, r *http.Request) {
+	identity, ok := h.Authenticate(w, r)
+	if !ok {
+		return
+	}
+	if _, ok := h.requireTrustedDevice(w, r, identity.TeamID); !ok {
+		return
+	}
+
+	var req prepareUploadRequest
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+
+	eventID, err := uuid.Parse(strings.TrimSpace(req.EventID))
+	if err != nil {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_EVENT_ID", "event_id must be a uuid")
+		return
+	}
+	if req.SnapshotSeq < 0 {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_BASE_SEQ",
+			"snapshot_seq must be a non-negative integer")
+		return
+	}
+	if req.SchemaVersion <= 0 {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_SCHEMA_VERSION",
+			"schema_version must be positive")
+		return
+	}
+	if req.PayloadKeyVersion <= 0 {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_KEY_VERSION",
+			"payload_key_version must be positive")
+		return
+	}
+	if req.SizeBytes <= 0 {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_SIZE", "size_bytes must be positive")
+		return
+	}
+	if req.SizeBytes > h.cfg.MaxSnapshotBytes {
+		httpx.Error(w, http.StatusRequestEntityTooLarge, "SNAPSHOT_TOO_LARGE",
+			"snapshot exceeds the configured maximum size")
+		return
+	}
+	checksum := blobs.FormatChecksum(req.Checksum)
+	if !validChecksumFormat(checksum) {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_CHECKSUM",
+			"checksum must be sha256:<64 hex chars>")
+		return
+	}
+
+	snapshotID := deterministicSnapshotID(identity.TeamID, eventID)
+	storagePath := blobs.SnapshotRelPath(snapshotID)
+	expires := time.Now().Add(h.cfg.TransferTTL).Unix()
+
+	ticket, err := h.signPayload(uploadTicket{
+		TeamID:            identity.TeamID.String(),
+		EventID:           eventID.String(),
+		Path:              storagePath,
+		Checksum:          checksum,
+		Size:              req.SizeBytes,
+		SnapshotSeq:       req.SnapshotSeq,
+		SchemaVersion:     req.SchemaVersion,
+		PayloadKeyVersion: req.PayloadKeyVersion,
+		Exp:               expires,
+	})
+	if err != nil {
+		h.internal(w, "sign upload ticket", err)
+		return
+	}
+
+	descriptor, err := h.uploadTransferDescriptor(transferClaims{
+		ID:       snapshotID,
+		Path:     storagePath,
+		Mode:     "w",
+		Checksum: checksum,
+		Size:     req.SizeBytes,
+		Exp:      expires,
+	})
+	if err != nil {
+		h.internal(w, "sign upload transfer", err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, prepareUploadResponse{
+		Transfer: descriptor,
+		Ticket:   ticket,
+	})
+}
+
+func (h *Handler) completeSnapshotUpload(w http.ResponseWriter, r *http.Request) {
 	identity, ok := h.Authenticate(w, r)
 	if !ok {
 		return
@@ -27,108 +115,73 @@ func (h *Handler) uploadSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	headers := r.Header
-	eventIDRaw := strings.TrimSpace(headers.Get("x-snapshot-event-id"))
-	eventID, err := uuid.Parse(eventIDRaw)
-	if err != nil {
-		httpx.BadRequest(w, "INVALID_SNAPSHOT_EVENT_ID", "x-snapshot-event-id must be a uuid")
-		return
-	}
-	schemaVersion, err := requiredIntHeader(r, "x-snapshot-schema-version")
-	if err != nil {
-		httpx.BadRequest(w, "INVALID_SNAPSHOT_SCHEMA_VERSION", err.Error())
-		return
-	}
-	payloadKeyVersion, err := requiredIntHeader(r, "x-snapshot-payload-key-version")
-	if err != nil {
-		httpx.BadRequest(w, "INVALID_SNAPSHOT_KEY_VERSION", err.Error())
-		return
-	}
-	declaredSize, err := requiredInt64Header(r, "x-snapshot-size-bytes")
-	if err != nil {
-		httpx.BadRequest(w, "INVALID_SNAPSHOT_SIZE", err.Error())
-		return
-	}
-	declaredChecksum := blobs.FormatChecksum(headers.Get("x-snapshot-checksum"))
-	if !validChecksumFormat(declaredChecksum) {
-		httpx.BadRequest(w, "INVALID_SNAPSHOT_CHECKSUM",
-			"x-snapshot-checksum must be sha256:<64 hex chars>")
-		return
-	}
-	coversTables := splitTables(headers.Get("x-snapshot-covers-tables"))
-	metadataPayload := headers.Get("x-snapshot-metadata-payload")
-
-	baseSeq := int64(0)
-	if raw := strings.TrimSpace(headers.Get("x-snapshot-base-seq")); raw != "" {
-		v, parseErr := strconv.ParseInt(raw, 10, 64)
-		if parseErr != nil || v < 0 {
-			httpx.BadRequest(
-				w,
-				"INVALID_SNAPSHOT_BASE_SEQ",
-				"x-snapshot-base-seq must be a non-negative integer",
-			)
-			return
-		}
-		baseSeq = v
-	}
-
-	if declaredSize > h.cfg.MaxSnapshotBytes {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "SNAPSHOT_TOO_LARGE",
-			"snapshot exceeds the configured maximum size")
+	var req completeUploadRequest
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
-	snapshotID := deterministicSnapshotID(identity.TeamID, eventID)
-	relPath, size, checksum, err := h.blobs.Write(snapshotID, r.Body, h.cfg.MaxSnapshotBytes)
-	if errors.Is(err, blobs.ErrTooLarge) {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "SNAPSHOT_TOO_LARGE",
-			"snapshot exceeds the configured maximum size")
+	var ticket uploadTicket
+	if err := h.verifyPayload(req.Ticket, &ticket); err != nil {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_TICKET", "ticket is invalid")
+		return
+	}
+	if transferExpired(ticket.Exp) {
+		httpx.Conflict(w, "SNAPSHOT_UPLOAD_EXPIRED", "ticket has expired")
+		return
+	}
+	if ticket.TeamID != identity.TeamID.String() {
+		httpx.Forbidden(w, "SNAPSHOT_TEAM_MISMATCH", "ticket belongs to another team")
+		return
+	}
+	eventID, err := uuid.Parse(ticket.EventID)
+	if err != nil {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_TICKET", "ticket event id is invalid")
+		return
+	}
+
+	file, size, err := h.blobs.Open(ticket.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		httpx.Conflict(w, "SNAPSHOT_TRANSFER_MISSING",
+			"the snapshot bytes were not uploaded before completion")
 		return
 	}
 	if err != nil {
-		h.internal(w, "write snapshot", err)
+		h.internal(w, "open snapshot for completion", err)
 		return
 	}
-	if size != declaredSize {
-		_ = h.blobs.Remove(relPath)
-		httpx.BadRequest(w, "SNAPSHOT_SIZE_MISMATCH",
-			"uploaded body length does not match x-snapshot-size-bytes")
-		return
-	}
-	if checksum != blobs.FormatChecksum(declaredChecksum) {
-		_ = h.blobs.Remove(relPath)
-		httpx.BadRequest(w, "SNAPSHOT_CHECKSUM_MISMATCH",
-			"uploaded bytes do not match x-snapshot-checksum")
+	_ = file.Close()
+
+	if size != ticket.Size {
+		httpx.Conflict(w, "SNAPSHOT_SIZE_MISMATCH",
+			"stored snapshot size does not match the prepared upload")
 		return
 	}
 
 	meta, err := h.store.InsertSnapshot(r.Context(), identity.TeamID, store.InsertSnapshotInput{
 		DeviceID:          device.ID,
 		EventID:           eventID,
-		SchemaVersion:     schemaVersion,
-		CoversTables:      coversTables,
+		SchemaVersion:     ticket.SchemaVersion,
+		CoversTables:      []string{},
 		SizeBytes:         size,
-		Checksum:          checksum,
-		StoragePath:       relPath,
-		PayloadKeyVersion: payloadKeyVersion,
-		OplogSeq:          baseSeq,
+		Checksum:          ticket.Checksum,
+		StoragePath:       ticket.Path,
+		PayloadKeyVersion: ticket.PayloadKeyVersion,
+		OplogSeq:          ticket.SnapshotSeq,
 	})
 	if err != nil {
 		h.internal(w, "record snapshot", err)
 		return
 	}
 
-	_ = metadataPayload
-
 	slog.Info("snapshot uploaded",
 		"snapshotId", meta.ID.String(), "teamId", identity.TeamID.String(),
 		"sizeBytes", size, "oplogSeq", meta.OplogSeq, "requestId", httpx.RequestID(r))
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"snapshotId": meta.ID.String(),
-		"r2Key":      relPath,
-		"oplogSeq":   meta.OplogSeq,
-		"createdAt":  formatTime(meta.CreatedAt),
+	httpx.WriteJSON(w, http.StatusOK, snapshotUploadResponse{
+		SnapshotID: meta.ID.String(),
+		R2Key:      meta.StoragePath,
+		OplogSeq:   meta.OplogSeq,
+		CreatedAt:  formatTime(meta.CreatedAt),
 	})
 }
 
@@ -152,6 +205,48 @@ func (h *Handler) latestSnapshot(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, newSnapshotLatest(meta))
 }
 
+func (h *Handler) snapshotDownloadURL(w http.ResponseWriter, r *http.Request) {
+	identity, ok := h.Authenticate(w, r)
+	if !ok {
+		return
+	}
+	if _, ok := h.requireTrustedDevice(w, r, identity.TeamID); !ok {
+		return
+	}
+
+	id, err := uuid.Parse(r.PathValue("snapshotId"))
+	if err != nil {
+		httpx.BadRequest(w, "INVALID_SNAPSHOT_ID", "snapshotId must be a uuid")
+		return
+	}
+	meta, err := h.store.SnapshotByID(r.Context(), identity.TeamID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		httpx.NotFound(w, "SNAPSHOT_NOT_FOUND", "snapshot not found")
+		return
+	}
+	if err != nil {
+		h.internal(w, "load snapshot", err)
+		return
+	}
+
+	descriptor, err := h.downloadTransferDescriptor(transferClaims{
+		Path:     meta.StoragePath,
+		Mode:     "r",
+		Checksum: meta.Checksum,
+		Size:     meta.SizeBytes,
+		Exp:      time.Now().Add(h.cfg.TransferTTL).Unix(),
+	})
+	if err != nil {
+		h.internal(w, "sign download transfer", err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, snapshotDownloadResponse{
+		Transfer: descriptor,
+		Snapshot: newSnapshotLatest(meta),
+	})
+}
+
 func newSnapshotLatest(m store.SnapshotMeta) snapshotLatestResponse {
 	tables := m.CoversTables
 	if tables == nil {
@@ -168,80 +263,6 @@ func newSnapshotLatest(m store.SnapshotMeta) snapshotLatestResponse {
 	}
 }
 
-func (h *Handler) downloadSnapshot(w http.ResponseWriter, r *http.Request) {
-	identity, ok := h.Authenticate(w, r)
-	if !ok {
-		return
-	}
-	if _, ok := h.requireTrustedDevice(w, r, identity.TeamID); !ok {
-		return
-	}
-	id, err := uuid.Parse(r.PathValue("snapshotId"))
-	if err != nil {
-		httpx.BadRequest(w, "INVALID_SNAPSHOT_ID", "snapshotId must be a uuid")
-		return
-	}
-	meta, err := h.store.SnapshotByID(r.Context(), identity.TeamID, id)
-	if errors.Is(err, store.ErrNotFound) {
-		httpx.NotFound(w, "SNAPSHOT_NOT_FOUND", "snapshot not found")
-		return
-	}
-	if err != nil {
-		h.internal(w, "load snapshot", err)
-		return
-	}
-
-	file, size, err := h.blobs.Open(meta.StoragePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			httpx.NotFound(w, "SNAPSHOT_NOT_FOUND", "snapshot payload is no longer stored")
-			return
-		}
-		h.internal(w, "open snapshot payload", err)
-		return
-	}
-	defer func() { _ = file.Close() }()
-
-	tables := meta.CoversTables
-	if tables == nil {
-		tables = []string{}
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("x-snapshot-schema-version", strconv.Itoa(meta.SchemaVersion))
-	w.Header().Set("x-snapshot-covers-tables", strings.Join(tables, ","))
-	w.Header().Set("x-snapshot-checksum", meta.Checksum)
-	w.WriteHeader(http.StatusOK)
-
-	if _, err := io.Copy(w, file); err != nil {
-		slog.Error("stream snapshot", "error", err, "snapshotId", meta.ID.String())
-	}
-}
-
-func requiredIntHeader(r *http.Request, name string) (int, error) {
-	raw := strings.TrimSpace(r.Header.Get(name))
-	if raw == "" {
-		return 0, errors.New("missing header " + name)
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, errors.New("invalid header " + name)
-	}
-	return v, nil
-}
-
-func requiredInt64Header(r *http.Request, name string) (int64, error) {
-	raw := strings.TrimSpace(r.Header.Get(name))
-	if raw == "" {
-		return 0, errors.New("missing header " + name)
-	}
-	v, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, errors.New("invalid header " + name)
-	}
-	return v, nil
-}
-
 func validChecksumFormat(v string) bool {
 	hexPart, ok := strings.CutPrefix(strings.ToLower(v), blobs.ChecksumPrefix)
 	if !ok || len(hexPart) != 64 {
@@ -254,20 +275,6 @@ func validChecksumFormat(v string) bool {
 		}
 	}
 	return true
-}
-
-func splitTables(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
-		return []string{}
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if trimmed := strings.TrimSpace(p); trimmed != "" {
-			out = append(out, trimmed)
-		}
-	}
-	return out
 }
 
 func deterministicSnapshotID(teamID, eventID uuid.UUID) string {

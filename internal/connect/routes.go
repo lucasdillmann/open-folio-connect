@@ -28,9 +28,13 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sync/events/cursor", h.eventsCursor)
 	mux.HandleFunc("GET /api/v1/sync/events/reconcile-ready-state", h.reconcileReadyState)
 
-	mux.HandleFunc("POST /api/v1/sync/snapshots/upload", h.uploadSnapshot)
+	mux.HandleFunc("POST /api/v1/sync/snapshots/prepare-upload", h.prepareSnapshotUpload)
+	mux.HandleFunc("POST /api/v1/sync/snapshots/complete-upload", h.completeSnapshotUpload)
+	mux.HandleFunc("POST /api/v1/sync/snapshots/{snapshotId}/download-url", h.snapshotDownloadURL)
 	mux.HandleFunc("GET /api/v1/sync/snapshots/latest", h.latestSnapshot)
-	mux.HandleFunc("GET /api/v1/sync/snapshots/{snapshotId}", h.downloadSnapshot)
+
+	mux.HandleFunc("PUT /api/v1/sync/transfers/{token}", h.uploadTransfer)
+	mux.HandleFunc("GET /api/v1/sync/transfers/{token}", h.downloadTransfer)
 
 	mux.HandleFunc("POST /api/v1/sync/team/devices/{deviceId}/pairings", h.createPairing)
 	mux.HandleFunc("GET /api/v1/sync/team/devices/{deviceId}/pairings/{pairingId}", h.getPairing)

@@ -56,6 +56,9 @@ func loadConfig(requireSecret bool) (Config, error) {
 	if c.ChallengeTTL, err = durationEnv("OFC_CHALLENGE_TTL", 5*time.Minute); err != nil {
 		return Config{}, err
 	}
+	if c.TransferTTL, err = durationEnv("OFC_TRANSFER_TTL", 10*time.Minute); err != nil {
+		return Config{}, err
+	}
 	if c.MaxSnapshotBytes, err = int64Env("OFC_MAX_SNAPSHOT_BYTES", 512*1024*1024); err != nil {
 		return Config{}, err
 	}

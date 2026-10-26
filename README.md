@@ -25,6 +25,15 @@ phone, NAS, etc) with end-to-end encryption and zero data leaving your network.
 > observed in Wealthfolio's client-side source; no proprietary Connect backend
 > code was used or copied. 
 
+## Compatibility
+
+Tested against **Wealthfolio v3.11.0**. The device-sync wire protocol is
+unchanged from v3.10.0, so clients from v3.10.0 onward are supported.
+
+Wealthfolio releases before v3.10.0 use the old single-call snapshot endpoints.
+They can still sign in and replicate the oplog, but snapshot upload and download
+will fail against this server.
+
 ## How to use it
 
 Three pieces come together: a running server, a Wealthfolio build pointed at it,
@@ -88,13 +97,14 @@ docker compose up -d
 |-----------------------|-------------------------|--------------------------------------------------------------------|
 | `OFC_DATABASE_URL`    |                         | Postgres connection string (required)                              |
 | `OFC_JWT_SECRET`      | generated               | Signs access tokens. Changing it signs everyone out.               |
-| `OFC_BASE_URL`        | `http://localhost:8080` | Public URL clients reach the server on                             |
+| `OFC_BASE_URL`        | `http://localhost:8080` | Public URL clients reach the server on. Snapshot transfers require an `https` URL with no explicit port |
 | `OFC_DATA_DIR`        | `./data`                | Where snapshot ciphertext is stored                                |
 | `OFC_ADMIN_EMAIL`     |                         | Account created on first start                                     |
 | `OFC_DEV_OTP`         | `false`                 | Return login codes in the API response                             |
 | `OFC_ALLOWED_ORIGINS` |                         | CORS allowlist; only needed for a browser client on another origin |
 | `OFC_ADDR`            | `:8080`                 | Listen address                                                     |
 | `OFC_LOG_LEVEL`       | `info`                  | `debug`, `info`, `warn`, `error`                                   |
+| `OFC_TRANSFER_TTL`    | `10m`                   | How long a signed snapshot transfer URL stays valid                |
 
 For trusted-LAN use, put it behind TLS in a reverse proxy.
 
@@ -111,11 +121,17 @@ CONNECT_AUTH_URL=https://ofc.myhomelab.com
 CONNECT_API_URL=https://ofc.myhomelab.com
 CONNECT_AUTH_PUBLISHABLE_KEY=sb_publishable_openfolioconnect
 CONNECT_OAUTH_CALLBACK_URL=wealthfolio://auth/callback
+CONNECT_STORAGE_ALLOWED_HOSTS=ofc.myhomelab.com
 ```
 
 `CONNECT_AUTH_URL` and `CONNECT_AUTH_PUBLISHABLE_KEY` must both be set,
 otherwise the Connect feature is compiled out entirely. The publishable key is
 a public identifier, not a secret, and just needs to match what the app sends.
+
+`CONNECT_STORAGE_ALLOWED_HOSTS` is a comma-separated hostname allowlist, not a
+URL. It must contain the host open-folio-connect serves snapshot transfers from
+(the host part of `OFC_BASE_URL`). The matching `OFC_BASE_URL` must be `https`
+with no explicit port, or the client refuses the transfer URL.
 
 **b) One-line CSP edit**: open `apps/tauri/tauri.conf.json`, find the
 `security.csp` line, and add your origin to `connect-src` (do the same in
@@ -129,9 +145,10 @@ Without this, the app's webview blocks the login request before it leaves the
 device. The same class of error you'd see in a browser console.
 
 The web/self-hosted server (instead of the desktop/mobile apps) reads
-`CONNECT_AUTH_URL` and `CONNECT_API_URL` as runtime environment variables,
-so that deployment path needs the env vars set on the container rather than a
-recompile.
+`CONNECT_AUTH_URL`, `CONNECT_API_URL`, and `CONNECT_STORAGE_ALLOWED_HOSTS` as
+runtime environment variables, so that deployment path needs the env vars set on
+the container rather than a recompile. The wealthfolio Dockerfile instead bakes
+the storage host through its `connect-storage-hosts` build secret.
 
 **Toolchain notes** (desktop/mobile builds): Wealthfolio has its own set of
 development dependencies. Please read the official guide to setup your PC in
@@ -169,6 +186,10 @@ From then on devices replicate over the oplog in the background.
 - **Back up two things**: the Postgres database (oplog + device records) and
   `OFC_DATA_DIR` (snapshot ciphertext). The snapshot bytes are useless without a
   device's root key, so the database matters most.
+- **Snapshot bytes move over signed URLs**: the client fetches short-lived
+  transfer links from `/api/v1/sync/snapshots/...`, then PUTs or GETs the
+  ciphertext directly. The signature in the URL is the credential; those requests
+  carry no bearer token.
 - **The oplog is never pruned**: that is what lets a new device bootstrap from
   a snapshot and replay the tail. It grows slowly; a personal portfolio is a few
   megabytes a year.

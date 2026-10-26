@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -51,6 +52,7 @@ func run() error {
 		return err
 	}
 	setupLogging(cfg.LogLevel)
+	warnTransferBaseURL(cfg.BaseURL)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -171,6 +173,15 @@ func recoverer(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+func warnTransferBaseURL(raw string) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Port() != "" {
+		slog.Warn("OFC_BASE_URL should be an https URL without an explicit port; "+
+			"Wealthfolio rejects snapshot transfer destinations that are not https "+
+			"on the default port", "baseUrl", raw)
+	}
 }
 
 func setupLogging(level string) {

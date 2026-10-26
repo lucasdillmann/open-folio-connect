@@ -20,6 +20,7 @@ import (
 )
 
 type transferClaims struct {
+	Dir      string `json:"d,omitempty"`
 	Path     string `json:"p,omitempty"`
 	ID       string `json:"id,omitempty"`
 	Mode     string `json:"m"`
@@ -138,24 +139,34 @@ func (h *Handler) uploadTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	relPath, size, checksum, err := h.blobs.Write(claims.ID, r.Body, h.cfg.MaxSnapshotBytes)
+	dir := claims.Dir
+	if dir == "" {
+		dir = blobs.SnapshotDir
+	}
+	relPath, size, checksum, err := h.blobs.Write(dir, claims.ID, r.Body, h.maxTransferBytes(dir))
 	if errors.Is(err, blobs.ErrTooLarge) {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "SNAPSHOT_TOO_LARGE",
-			"snapshot exceeds the configured maximum size")
+		httpx.Error(w, http.StatusRequestEntityTooLarge, "TRANSFER_TOO_LARGE",
+			"transfer exceeds the configured maximum size")
 		return
 	}
 	if err != nil {
-		h.internal(w, "write snapshot transfer", err)
+		h.internal(w, "write transfer", err)
 		return
 	}
 	if size != claims.Size || checksum != claims.Checksum ||
 		(claims.Path != "" && relPath != claims.Path) {
 		_ = h.blobs.Remove(relPath)
-		httpx.Conflict(w, "SNAPSHOT_TRANSFER_MISMATCH",
-			"uploaded bytes do not match the prepared snapshot")
+		httpx.Conflict(w, "TRANSFER_MISMATCH", "uploaded bytes do not match the prepared transfer")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) maxTransferBytes(dir string) int64 {
+	if dir == blobs.BackupDir {
+		return h.cfg.MaxBackupBytes
+	}
+	return h.cfg.MaxSnapshotBytes
 }
 
 func (h *Handler) downloadTransfer(w http.ResponseWriter, r *http.Request) {
@@ -175,17 +186,17 @@ func (h *Handler) downloadTransfer(w http.ResponseWriter, r *http.Request) {
 
 	file, size, err := h.blobs.Open(claims.Path)
 	if errors.Is(err, os.ErrNotExist) {
-		httpx.NotFound(w, "SNAPSHOT_NOT_FOUND", "snapshot payload is no longer stored")
+		httpx.NotFound(w, "TRANSFER_NOT_FOUND", "transfer payload is no longer stored")
 		return
 	}
 	if err != nil {
-		h.internal(w, "open snapshot transfer", err)
+		h.internal(w, "open transfer", err)
 		return
 	}
 	defer func() { _ = file.Close() }()
 
 	if claims.Size > 0 && size != claims.Size {
-		h.internal(w, "snapshot transfer size", errors.New("stored snapshot size changed"))
+		h.internal(w, "transfer size", errors.New("stored transfer size changed"))
 		return
 	}
 
@@ -193,6 +204,6 @@ func (h *Handler) downloadTransfer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, file); err != nil {
-		slog.Error("stream snapshot transfer", "error", err)
+		slog.Error("stream transfer", "error", err)
 	}
 }

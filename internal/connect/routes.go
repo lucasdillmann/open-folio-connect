@@ -36,6 +36,20 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/sync/transfers/{token}", h.uploadTransfer)
 	mux.HandleFunc("GET /api/v1/sync/transfers/{token}", h.downloadTransfer)
 
+	mux.HandleFunc("GET /api/v1/backups/policy", h.backupPolicy)
+	mux.HandleFunc("PUT /api/v1/backups/policy", h.putBackupPolicy)
+	mux.HandleFunc("GET /api/v1/backups/key", h.backupKey)
+	mux.HandleFunc("PUT /api/v1/backups/key", h.putBackupKey)
+	mux.HandleFunc("GET /api/v1/backups/key/trusted-envelope", h.backupTrustedEnvelope)
+	mux.HandleFunc("PUT /api/v1/backups/key/trusted-envelope", h.putBackupTrustedEnvelope)
+	mux.HandleFunc("PUT /api/v1/backups/key/recovery-envelope", h.putBackupRecoveryEnvelope)
+	mux.HandleFunc("GET /api/v1/backups/history", h.backupHistory)
+	mux.HandleFunc("POST /api/v1/backups/prepare-upload", h.prepareBackupUpload)
+	mux.HandleFunc("POST /api/v1/backups/complete-upload", h.completeBackupUpload)
+	mux.HandleFunc("POST /api/v1/backups/{backupId}/download-url", h.backupDownloadURL)
+	mux.HandleFunc("DELETE /api/v1/backups", h.deleteBackups)
+	mux.HandleFunc("DELETE /api/v1/backups/{backupId}", h.deleteBackups)
+
 	mux.HandleFunc("POST /api/v1/sync/team/devices/{deviceId}/pairings", h.createPairing)
 	mux.HandleFunc("GET /api/v1/sync/team/devices/{deviceId}/pairings/{pairingId}", h.getPairing)
 	mux.HandleFunc(

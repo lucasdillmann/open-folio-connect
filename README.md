@@ -28,7 +28,8 @@ phone, NAS, etc) with end-to-end encryption and zero data leaving your network.
 ## Compatibility
 
 Tested against **Wealthfolio v3.11.0**. The device-sync wire protocol is
-unchanged from v3.10.0, so clients from v3.10.0 onward are supported.
+unchanged from v3.10.0, so clients from v3.10.0 onward are supported. Cloud
+backups (introduced in Wealthfolio v3.11.0) are supported as well.
 
 Wealthfolio releases before v3.10.0 use the old single-call snapshot endpoints.
 They can still sign in and replicate the oplog, but snapshot upload and download
@@ -97,14 +98,18 @@ docker compose up -d
 |-----------------------|-------------------------|--------------------------------------------------------------------|
 | `OFC_DATABASE_URL`    |                         | Postgres connection string (required)                              |
 | `OFC_JWT_SECRET`      | generated               | Signs access tokens. Changing it signs everyone out.               |
-| `OFC_BASE_URL`        | `http://localhost:8080` | Public URL clients reach the server on. Snapshot transfers require an `https` URL with no explicit port |
-| `OFC_DATA_DIR`        | `./data`                | Where snapshot ciphertext is stored                                |
+| `OFC_BASE_URL`        | `http://localhost:8080` | Public URL clients reach the server on. Snapshot and backup transfers require an `https` URL with no explicit port |
+| `OFC_DATA_DIR`        | `./data`                | Where snapshot and backup ciphertext is stored                     |
 | `OFC_ADMIN_EMAIL`     |                         | Account created on first start                                     |
 | `OFC_DEV_OTP`         | `false`                 | Return login codes in the API response                             |
 | `OFC_ALLOWED_ORIGINS` |                         | CORS allowlist; only needed for a browser client on another origin |
 | `OFC_ADDR`            | `:8080`                 | Listen address                                                     |
 | `OFC_LOG_LEVEL`       | `info`                  | `debug`, `info`, `warn`, `error`                                   |
-| `OFC_TRANSFER_TTL`    | `10m`                   | How long a signed snapshot transfer URL stays valid                |
+| `OFC_TRANSFER_TTL`    | `10m`                   | How long a signed transfer URL stays valid                         |
+| `OFC_BACKUP_INTERVAL` | `24h`                   | Time between automatic cloud backups                               |
+| `OFC_BACKUP_RETENTION_DAYS` | `45`              | Delete cloud backups older than this; `0` keeps them forever       |
+| `OFC_BACKUP_MANUAL_DAILY_LIMIT` | `0`           | Max "back up now" captures per UTC day; `0` is unlimited           |
+| `OFC_MAX_BACKUP_BYTES` | `256Mi`                | Largest accepted cloud backup ciphertext                           |
 
 For trusted-LAN use, put it behind TLS in a reverse proxy.
 
@@ -190,6 +195,11 @@ From then on devices replicate over the oplog in the background.
   transfer links from `/api/v1/sync/snapshots/...`, then PUTs or GETs the
   ciphertext directly. The signature in the URL is the credential; those requests
   carry no bearer token.
+- **Cloud backups are per-account**: they use a separate encryption key and are
+  stored under `OFC_DATA_DIR/backups`. The server only stores opaque envelopes
+  and ciphertext, so losing the recovery code loses access to the backups.
+  One chosen source device captures automatically every `OFC_BACKUP_INTERVAL`;
+  the server never decrypts anything.
 - **The oplog is never pruned**: that is what lets a new device bootstrap from
   a snapshot and replay the tail. It grows slowly; a personal portfolio is a few
   megabytes a year.

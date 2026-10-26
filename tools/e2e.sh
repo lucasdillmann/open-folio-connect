@@ -543,7 +543,96 @@ check "a revoked device still reads its record" \
   "$(curl -sf "${AUTH[@]}" -H "x-wf-device-id: $DEVICE_A" "$BASE/api/v1/sync/team/devices/$DEVICE_B")" \
   '"trustState":"revoked"'
 
-section "9. destructive reset"
+section "9. cloud backups"
+BPOLICY=$(curl -sf "${AUTH[@]}" "$BASE/api/v1/backups/policy")
+check "backup policy is available" "$BPOLICY" '"uploadEntitled":true'
+equal "backup policy starts disabled" "$(j "$BPOLICY" "['enabled']")" "False"
+check "backup policy reports the team" "$BPOLICY" '"teamId":"'
+
+BSOURCE=$(uuid)
+BENABLE=$(curl -sf -X PUT "$BASE/api/v1/backups/policy" "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d "{\"revision\":0,\"enabled\":true,\"source_id\":\"$BSOURCE\"}")
+check "enabling backups sets the source" "$BENABLE" "\"sourceId\":\"$BSOURCE\""
+equal "enabling backups enables the policy" "$(j "$BENABLE" "['enabled']")" "True"
+equal "enabling backups bumps the revision" "$(j "$BENABLE" "['revision']")" "1"
+check "enabling backups schedules the first capture" "$BENABLE" '"nextDueAt":"'
+BREV=$(j "$BENABLE" "['revision']")
+
+BKEY=$(uuid)
+RECENV="{\"format\":1,\"recovery_id\":\"$(uuid)\",\"ciphertext\":\"cmVjb3Zlcnk=\"}"
+BKEYRESP=$(curl -sf -X PUT "$BASE/api/v1/backups/key" "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d "{\"key_id\":\"$BKEY\",\"recovery_envelope\":$RECENV}")
+check "backup key is created" "$BKEYRESP" '"created":true'
+equal "backup key id round-trips" "$(j "$BKEYRESP" "['keyId']")" "$BKEY"
+equal "backup key is readable" \
+  "$(j "$(curl -sf "${AUTH[@]}" "$BASE/api/v1/backups/key")" "['keyId']")" "$BKEY"
+
+BTRUSTED=$(curl -sf "${AUTH[@]}" -H "x-wf-device-id: $DEVICE_A" \
+  "$BASE/api/v1/backups/key/trusted-envelope")
+equal "trusted envelope starts at revision zero" "$(j "$BTRUSTED" "['revision']")" "0"
+equal "trusted envelope is null before sharing" "$(j "$BTRUSTED" "['envelope']")" "None"
+
+TRUSTENV="{\"format\":1,\"team_id\":\"$(uuid)\",\"sync_key_version\":1,\"ciphertext\":\"dHJ1c3RlZA==\"}"
+curl -sf -X PUT "$BASE/api/v1/backups/key/trusted-envelope" "${AUTH[@]}" \
+  -H 'Content-Type: application/json' -H "x-wf-device-id: $DEVICE_A" \
+  -d "{\"revision\":0,\"envelope\":$TRUSTENV}" >/dev/null
+BTRUSTED2=$(curl -sf "${AUTH[@]}" -H "x-wf-device-id: $DEVICE_A" \
+  "$BASE/api/v1/backups/key/trusted-envelope")
+equal "trusted envelope is published" "$(j "$BTRUSTED2" "['revision']")" "1"
+check "trusted envelope round-trips" "$BTRUSTED2" '"ciphertext":"dHJ1c3RlZA=="'
+status "a stale trusted envelope is refused" 409 -X PUT \
+  "$BASE/api/v1/backups/key/trusted-envelope" "${AUTH[@]}" \
+  -H 'Content-Type: application/json' -H "x-wf-device-id: $DEVICE_A" \
+  -d "{\"revision\":0,\"envelope\":$TRUSTENV}"
+
+printf 'backup-%s\000\001\002binary' "$RUN" > /tmp/ofc-backup.bin
+BSUM=$(shasum -a 256 /tmp/ofc-backup.bin | cut -d' ' -f1)
+BSIZE=$(wc -c < /tmp/ofc-backup.bin | tr -d ' ')
+BBACKUP=$(uuid)
+BPREP=$(curl -sf -X POST "$BASE/api/v1/backups/prepare-upload" "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d "{\"request_id\":\"$(uuid)\",\"backup_id\":\"$BBACKUP\",\"key_id\":\"$BKEY\",\"source_id\":\"$BSOURCE\",\"policy_revision\":$BREV,\"format\":1,\"size_bytes\":$BSIZE,\"checksum\":\"sha256:$BSUM\",\"encrypted_metadata\":\"bWV0YQ==\",\"trigger\":\"setup\"}")
+check "backup prepare returns a ticket" "$BPREP" '"ticket"'
+check "backup prepare returns a PUT transfer" "$BPREP" '"method":"PUT"'
+BTICKET=$(j "$BPREP" "['ticket']")
+BURL=$(j "$BPREP" "['transfer']['url']")
+BHEADSUM=$(j "$BPREP" "['transfer']['headers']['x-amz-checksum-sha256']")
+status "backup transfer accepts the ciphertext" 204 -X PUT "$BURL" \
+  -H "content-length: $BSIZE" -H "x-amz-checksum-sha256: $BHEADSUM" \
+  --data-binary @/tmp/ofc-backup.bin
+
+BUP=$(curl -sf -X POST "$BASE/api/v1/backups/complete-upload" "${AUTH[@]}" \
+  -H 'Content-Type: application/json' -d "{\"ticket\":\"$BTICKET\"}")
+check "backup completion publishes a point" "$BUP" '"backupId"'
+equal "backup completion echoes the id" "$(j "$BUP" "['backupId']")" "$BBACKUP"
+equal "backup completion records the size" "$(j "$BUP" "['sizeBytes']")" "$BSIZE"
+check "backup completion keeps the checksum" "$BUP" "\"checksum\":\"sha256:$BSUM\""
+
+BPOLICY2=$(curl -sf "${AUTH[@]}" "$BASE/api/v1/backups/policy")
+check "a published backup sets lastBackupAt" "$BPOLICY2" '"lastBackupAt":"'
+check "a published backup sets nextDueAt" "$BPOLICY2" '"nextDueAt":"'
+equal "history reports the backup" \
+  "$(j "$(curl -sf "${AUTH[@]}" "$BASE/api/v1/backups/history")" "[0]['backupId']")" "$BBACKUP"
+
+BDL=$(curl -sf -X POST "$BASE/api/v1/backups/$BBACKUP/download-url" "${AUTH[@]}" \
+  -H 'Content-Type: application/json' -d '{}')
+check "backup download-url returns a GET transfer" "$BDL" '"method":"GET"'
+BDLURL=$(j "$BDL" "['transfer']['url']")
+curl -sf "$BDLURL" -o /tmp/ofc-backup-dl.bin
+check "backup download is byte-identical" \
+  "$(cmp -s /tmp/ofc-backup.bin /tmp/ofc-backup-dl.bin && echo same || echo differ)" 'same'
+
+check "deleting one backup succeeds" \
+  "$(curl -sf -X DELETE "${AUTH[@]}" "$BASE/api/v1/backups/$BBACKUP")" '"deleted":true'
+absent "history no longer lists the deleted backup" \
+  "$(curl -sf "${AUTH[@]}" "$BASE/api/v1/backups/history")" "$BBACKUP"
+status "an unknown backup download is 404" 404 -X POST "${AUTH[@]}" \
+  -H 'Content-Type: application/json' -d '{}' \
+  "$BASE/api/v1/backups/$(uuid)/download-url"
+
+section "10. destructive reset"
 RESET=$(curl -sf -X POST "$BASE/api/v1/sync/team/keys/reset" "${AUTH[@]}" \
   -H 'Content-Type: application/json' -d '{"reason":"e2e"}')
 check "reset succeeds" "$RESET" '"success":true'

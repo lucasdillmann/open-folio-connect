@@ -87,6 +87,7 @@ func (h *Handler) prepareSnapshotUpload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	descriptor, err := h.uploadTransferDescriptor(transferClaims{
+		Dir:      blobs.SnapshotDir,
 		ID:       snapshotID,
 		Path:     storagePath,
 		Mode:     "w",
@@ -230,6 +231,7 @@ func (h *Handler) snapshotDownloadURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	descriptor, err := h.downloadTransferDescriptor(transferClaims{
+		Dir:      blobs.SnapshotDir,
 		Path:     meta.StoragePath,
 		Mode:     "r",
 		Checksum: meta.Checksum,

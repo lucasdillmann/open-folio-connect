@@ -6,7 +6,9 @@ PLATFORMS ?= linux/amd64,linux/arm64
 LDFLAGS := -s -w -X main.version=$(VERSION)
 LINUX_BINARIES := bin/ofc-linux-amd64 bin/ofc-linux-arm64
 
-.PHONY: build run lint format tidy test docker-build clean
+.PHONY: build run lint format tidy test docker-build clean FORCE
+
+FORCE:
 
 .prerequisites:
 ifeq ($(CI),true)
@@ -20,7 +22,7 @@ endif
 build:
 	go build -o $(BINARY) ./cmd/ofc
 
-bin/ofc-linux-%:
+bin/ofc-linux-%: FORCE
 	@mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=$* go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/ofc
 

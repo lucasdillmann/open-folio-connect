@@ -30,21 +30,26 @@ func (s *Store) Root() string {
 	return s.root
 }
 
-func (s *Store) relPath(id string) string {
-	return SnapshotRelPath(id)
-}
+const (
+	SnapshotDir = "snapshots"
+	BackupDir   = "backups"
+)
 
 func SnapshotRelPath(id string) string {
-	return filepath.Join("snapshots", id+".blob")
+	return filepath.Join(SnapshotDir, id+".blob")
 }
 
-func (s *Store) Write(id string, r io.Reader, maxBytes int64) (string, int64, string, error) {
-	dir := filepath.Join(s.root, "snapshots")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+func BackupRelPath(id string) string {
+	return filepath.Join(BackupDir, id+".blob")
+}
+
+func (s *Store) Write(dir, id string, r io.Reader, maxBytes int64) (string, int64, string, error) {
+	dirPath := filepath.Join(s.root, dir)
+	if err := os.MkdirAll(dirPath, 0o700); err != nil {
 		return "", 0, "", err
 	}
 
-	tmp, err := os.CreateTemp(dir, ".upload-*")
+	tmp, err := os.CreateTemp(dirPath, ".upload-*")
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -70,11 +75,12 @@ func (s *Store) Write(id string, r io.Reader, maxBytes int64) (string, int64, st
 		return "", 0, "", err
 	}
 
-	final := filepath.Join(s.root, s.relPath(id))
+	rel := filepath.Join(dir, id+".blob")
+	final := filepath.Join(s.root, rel)
 	if err := os.Rename(tmpName, final); err != nil {
 		return "", 0, "", err
 	}
-	return s.relPath(id), written, ChecksumPrefix + hex.EncodeToString(hasher.Sum(nil)), nil
+	return rel, written, ChecksumPrefix + hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func (s *Store) Open(rel string) (*os.File, int64, error) {

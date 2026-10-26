@@ -59,7 +59,22 @@ func loadConfig(requireSecret bool) (Config, error) {
 	if c.TransferTTL, err = durationEnv("OFC_TRANSFER_TTL", 10*time.Minute); err != nil {
 		return Config{}, err
 	}
+	if c.BackupInterval, err = durationEnv("OFC_BACKUP_INTERVAL", 24*time.Hour); err != nil {
+		return Config{}, err
+	}
 	if c.MaxSnapshotBytes, err = int64Env("OFC_MAX_SNAPSHOT_BYTES", 512*1024*1024); err != nil {
+		return Config{}, err
+	}
+	if c.MaxBackupBytes, err = int64Env("OFC_MAX_BACKUP_BYTES", 256*1024*1024); err != nil {
+		return Config{}, err
+	}
+	if c.BackupRetentionDays, err = nonNegativeIntEnv("OFC_BACKUP_RETENTION_DAYS", 45); err != nil {
+		return Config{}, err
+	}
+	if c.BackupManualDailyLimit, err = nonNegativeIntEnv(
+		"OFC_BACKUP_MANUAL_DAILY_LIMIT",
+		0,
+	); err != nil {
 		return Config{}, err
 	}
 	if c.PushBatchMax, err = intEnv("OFC_PUSH_BATCH_MAX", 2000); err != nil {
@@ -141,6 +156,21 @@ func intEnv(key string, fallback int) (int, error) {
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("%s must be positive", key)
+	}
+	return n, nil
+}
+
+func nonNegativeIntEnv(key string, fallback int) (int, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("%s must not be negative", key)
 	}
 	return n, nil
 }
